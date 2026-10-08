@@ -159,7 +159,6 @@ func run() error {
 		PresignTTL:    cfg.MinIO.PresignTTL,
 		UploadTimeout: cfg.MinIO.UploadTimeout,
 	}, logger)
-	}
 	if err != nil {
 		logger.Error("failed to initialise minio, continuing anyway", zap.Error(err))
 		evidenceStore = nil
