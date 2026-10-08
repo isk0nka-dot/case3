@@ -83,7 +83,7 @@ services:
       - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
     volumes:
       - clickhouse-dev-data:/var/lib/clickhouse
-      - "../migrations/clickhouse/init_full.sql:/docker-entrypoint-initdb.d/01_init_full.sql:ro"
+      - "../migrations/clickhouse:/docker-entrypoint-initdb.d:ro"
     ulimits:
       nofile:
         soft: 262144
