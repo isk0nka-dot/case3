@@ -67,7 +67,7 @@ services:
       - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
     volumes:
       - clickhouse-dev-data:/var/lib/clickhouse
-      - "./argus-infra/migrations/clickhouse/init_full.sql:/docker-entrypoint-initdb.d/01_init_full.sql:ro"
+      - "./argus-infra/migrations/clickhouse:/docker-entrypoint-initdb.d:ro"
     ulimits:
       nofile:
         soft: 262144
@@ -94,7 +94,7 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-argus_secret}
     volumes:
       - postgres-dev-data:/var/lib/postgresql/data
-      - "./argus-infra/migrations/postgres/init_full.sql:/docker-entrypoint-initdb.d/01_init_full.sql:ro"
+      - "./argus-infra/migrations/postgres:/docker-entrypoint-initdb.d:ro"
     networks:
       - argus-dev
     healthcheck:
