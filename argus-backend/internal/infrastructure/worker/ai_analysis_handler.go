@@ -238,18 +238,18 @@ func (h *AIAnalysisHandler) ProcessTask(ctx context.Context, t *asynq.Task) erro
 	verdict := totalSummary.verdict()
 	if verdict == "fraud" || totalSummary.maxFraudConf > 0.9 {
 		h.fireFraudAlert(payload, totalSummary)
+	}
 
-		// Recompute integrity score — the write-back events are now in ClickHouse.
-		if h.pgRepo != nil {
-			settings, settingsErr := h.pgRepo.GetExamProctoringSettings(ctx, payload.OrgID, payload.ExamID)
-			if settingsErr == nil && settings != nil {
-				_, scoreErr := h.scorer.ComputeScoreWithConfig(ctx, payload.SessionID, settings)
-				if scoreErr != nil {
-					h.logger.Warn("failed to recompute integrity score",
-						zap.String("session_id", payload.SessionID),
-						zap.Error(scoreErr),
-					)
-				}
+	// Recompute integrity score — the write-back events are now in ClickHouse.
+	if eventsWritten > 0 && h.pgRepo != nil {
+		settings, settingsErr := h.pgRepo.GetExamProctoringSettings(ctx, payload.OrgID, payload.ExamID)
+		if settingsErr == nil && settings != nil {
+			_, scoreErr := h.scorer.ComputeScoreWithConfig(ctx, payload.SessionID, settings)
+			if scoreErr != nil {
+				h.logger.Warn("failed to recompute integrity score",
+					zap.String("session_id", payload.SessionID),
+					zap.Error(scoreErr),
+				)
 			}
 		}
 	}
@@ -353,6 +353,19 @@ func (h *AIAnalysisHandler) processFrameTask(ctx context.Context, t *asynq.Task)
 	}, []*inferencepb.FrameAnalysis{frame}, thresholds)
 	if err != nil {
 		return fmt.Errorf("write realtime frame anomalies: %w", err)
+	}
+
+	if eventsWritten > 0 && h.pgRepo != nil {
+		settings, settingsErr := h.pgRepo.GetExamProctoringSettings(ctx, payload.OrgID, payload.ExamID)
+		if settingsErr == nil && settings != nil {
+			_, scoreErr := h.scorer.ComputeScoreWithConfig(ctx, payload.SessionID, settings)
+			if scoreErr != nil {
+				h.logger.Warn("failed to recompute integrity score for realtime frame",
+					zap.String("session_id", payload.SessionID),
+					zap.Error(scoreErr),
+				)
+			}
+		}
 	}
 
 	h.logger.Debug("AI frame analysis completed",
@@ -741,10 +754,12 @@ func classifyFrameAnomalies(frame *inferencepb.FrameAnalysis, thresholds AIAnaly
 		severity := valueobject.SeverityWarning
 		switch obj.ObjectType {
 		case "phone":
-			evtType = valueobject.BackendAIHiddenObject
-			severity = valueobject.SeverityCritical // телефон = критичное нарушение
-		case "book", "earbuds":
-			evtType = valueobject.BackendAIHiddenObject
+			evtType = valueobject.PhoneDetected
+			severity = valueobject.SeverityCritical
+		case "book":
+			evtType = valueobject.BookDetected
+		case "earbuds":
+			evtType = valueobject.EarbudsDetected
 		case "screen_reflection":
 			evtType = valueobject.BackendAIScreenReflection
 		case "person":
