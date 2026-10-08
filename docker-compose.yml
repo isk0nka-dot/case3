@@ -228,6 +228,7 @@ services:
       context: ./argus-backend
       dockerfile: Dockerfile.inference
     container_name: argus-dev-inference
+    entrypoint: ["/app/argus-inference", "-config", "/app/config/config.yaml"]
     restart: unless-stopped
     depends_on:
       - ai-sidecar
@@ -252,6 +253,7 @@ services:
       context: ./argus-backend
       dockerfile: Dockerfile.worker
     container_name: argus-dev-worker
+    entrypoint: ["/app/argus-worker", "-config", "/app/config/config.yaml"]
     restart: unless-stopped
     depends_on:
       kafka:
