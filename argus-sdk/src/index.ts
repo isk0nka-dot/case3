@@ -375,6 +375,14 @@ export class ArgusSDK extends EventEmitter<SDKEvents> {
             'Face not detected',
             0.9,
           );
+        } else if (frame.faceCount > 1 && this._session) {
+          this._session.sendEvent(
+            5, // MULTIPLE_PERSONS
+            2, // WARNING
+            1, // WEBCAM
+            `Multiple persons detected (${frame.faceCount})`,
+            0.9,
+          );
         }
       });
 
