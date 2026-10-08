@@ -18,12 +18,14 @@ import (
 
 	inferencepb "github.com/argus-ai/event-collector/api/proto/v1/inferencepb"
 	"github.com/argus-ai/event-collector/internal/domain/entity"
+	"github.com/argus-ai/event-collector/internal/domain/rules"
 	"github.com/argus-ai/event-collector/internal/domain/valueobject"
 	"github.com/argus-ai/event-collector/internal/infrastructure/alerting"
 	"github.com/argus-ai/event-collector/internal/infrastructure/clickhouse"
 	"github.com/argus-ai/event-collector/internal/infrastructure/forensic"
 	"github.com/argus-ai/event-collector/internal/infrastructure/postgres"
 	"github.com/argus-ai/event-collector/pkg/randutil"
+	"github.com/redis/go-redis/v9"
 )
 
 // AIAnalysisHandler processes TypeAIAnalysis asynq tasks.
@@ -39,6 +41,7 @@ type AIAnalysisHandler struct {
 	minioClient    *minio.Client
 	minioBucket    string
 	alerter        alerting.Provider
+	rdb            redis.Cmdable
 	logger         *zap.Logger
 	thresholds     AIAnalysisThresholds
 	frameExtractor FrameExtractor
@@ -46,10 +49,11 @@ type AIAnalysisHandler struct {
 }
 
 type AIAnalysisThresholds struct {
-	FaceMismatch     float32
-	Liveness         float32
-	ObjectConfidence float32
-	SpoofConfidence  float32
+	FaceMismatch           float32
+	Liveness               float32
+	ObjectConfidence       float32
+	SpoofConfidence        float32
+	EnableBackendFaceRules bool
 }
 
 const defaultAIAnalysisMaxFrameBytes = 10 * 1024 * 1024
@@ -62,8 +66,9 @@ func NewAIAnalysisHandler(
 	pgRepo *postgres.Repository,
 	minioClient *minio.Client,
 	minioBucket string,
-	logger *zap.Logger,
 	alerter alerting.Provider,
+	rdb redis.Cmdable,
+	logger *zap.Logger,
 	thresholds ...AIAnalysisThresholds,
 ) *AIAnalysisHandler {
 	h := &AIAnalysisHandler{
@@ -75,6 +80,7 @@ func NewAIAnalysisHandler(
 		minioClient:   minioClient,
 		minioBucket:   minioBucket,
 		alerter:       alerter,
+		rdb:           rdb,
 		logger:        logger.Named("asynq_ai_analysis"),
 		thresholds:    normalizeAIAnalysisThresholds(firstAIAnalysisThresholds(thresholds)),
 		maxFrameBytes: defaultAIAnalysisMaxFrameBytes,
@@ -221,13 +227,14 @@ func (h *AIAnalysisHandler) ProcessTask(ctx context.Context, t *asynq.Task) erro
 	)
 
 	// ── Step 4: Write detected anomalies back to ClickHouse ───────────────
-	eventsWritten, err := h.writeBackAnomalies(ctx, payload, allFrames, thresholds)
+	eventsWritten, finalSummary, err := h.writeBackAnomalies(ctx, payload, allFrames, thresholds)
 	if err != nil {
 		h.logger.Error("failed to write anomalies to clickhouse",
 			zap.String("session_id", payload.SessionID),
 			zap.Error(err),
 		)
 	}
+	totalSummary = finalSummary
 
 	h.logger.Info("anomalies written to clickhouse",
 		zap.String("session_id", payload.SessionID),
@@ -344,7 +351,7 @@ func (h *AIAnalysisHandler) processFrameTask(ctx context.Context, t *asynq.Task)
 		Objects:      resp.Objects,
 		Liveness:     resp.Liveness,
 	}
-	eventsWritten, err := h.writeBackAnomalies(ctx, AIAnalysisPayload{
+	eventsWritten, summary, err := h.writeBackAnomalies(ctx, AIAnalysisPayload{
 		SessionID:          payload.SessionID,
 		OrgID:              payload.OrgID,
 		ExamID:             payload.ExamID,
@@ -355,7 +362,38 @@ func (h *AIAnalysisHandler) processFrameTask(ctx context.Context, t *asynq.Task)
 		return fmt.Errorf("write realtime frame anomalies: %w", err)
 	}
 
-	if eventsWritten > 0 && h.pgRepo != nil {
+	if summary.fraudFrames > 0 && h.minioClient != nil {
+		hashBytes := sha256.Sum256(payload.FrameData)
+		hashHex := hex.EncodeToString(hashBytes[:])
+		objectKey := fmt.Sprintf("evidence/%s/ai_screenshot_%s.jpg", payload.SessionID, randutil.HexToken(8))
+		
+		_, err := h.minioClient.PutObject(ctx, h.minioBucket, objectKey, bytes.NewReader(payload.FrameData), int64(len(payload.FrameData)), minio.PutObjectOptions{
+			ContentType: payload.ContentType,
+		})
+		if err != nil {
+			h.logger.Error("failed to upload AI screenshot to MinIO", zap.Error(err))
+		} else {
+			// Write to evidence_fragments
+			now := time.Now().UTC()
+			err = h.chConn.Exec(ctx, `
+				INSERT INTO evidence_fragments (
+					fragment_id, session_id, event_id, org_id, exam_id, student_id,
+					sha256_hash, uri, size_bytes, content_type,
+					duration_sec, start_time, end_time, uploaded_at,
+					sequence_num, previous_hash, record_hash
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				randutil.HexToken(16), payload.SessionID, "", payload.OrgID, payload.ExamID, payload.StudentID,
+				hashHex, "s3://"+h.minioBucket+"/"+objectKey, int64(len(payload.FrameData)), payload.ContentType,
+				0, now, now, now,
+				0, "", "",
+			)
+			if err != nil {
+				h.logger.Error("failed to write evidence_fragments row for AI screenshot", zap.Error(err))
+			}
+		}
+	}
+
+	if summary.fraudFrames > 0 && h.pgRepo != nil {
 		settings, settingsErr := h.pgRepo.GetExamProctoringSettings(ctx, payload.OrgID, payload.ExamID)
 		if settingsErr == nil && settings != nil {
 			_, scoreErr := h.scorer.ComputeScoreWithConfig(ctx, payload.SessionID, settings)
@@ -529,7 +567,7 @@ func (h *AIAnalysisHandler) analyzeEvidenceFrames(
 
 	return &inferencepb.AnalyzeVideoResponse{
 		Frames:                frames,
-		Summary:               summarizeAIFrames(frames, h.thresholds),
+		Summary:               h.summarizeAIFrames(ctx, payload.SessionID, frames, h.thresholds),
 		TotalProcessingTimeMs: totalProcessingMs,
 	}, nil
 }
@@ -567,15 +605,17 @@ func (h *AIAnalysisHandler) writeBackAnomalies(
 	payload AIAnalysisPayload,
 	frames []*inferencepb.FrameAnalysis,
 	thresholds AIAnalysisThresholds,
-) (int, error) {
+) (int, aggregateSummary, error) {
 	count := 0
+	var summary aggregateSummary
+	summary.totalFrames = len(frames)
 	now := time.Now().UTC()
 
 	for _, frame := range frames {
 		if frame == nil {
 			continue
 		}
-		anomalies := classifyFrameAnomalies(frame, thresholds)
+		anomalies := h.classifyFrameAnomalies(ctx, payload.SessionID, frame, thresholds, true)
 		if err := h.chWriter.Write(ctx, h.buildEvent(payload, now, frame.TimestampSec, detectedAIAnomaly{
 			eventType:   valueobject.BackendAIFrameAnalyzed,
 			severity:    valueobject.SeverityInfo,
@@ -588,7 +628,13 @@ func (h *AIAnalysisHandler) writeBackAnomalies(
 		} else {
 			count++
 		}
+		if len(anomalies) > 0 {
+			summary.fraudFrames++
+		}
 		for _, anomaly := range anomalies {
+			if anomaly.confidence > summary.maxFraudConf {
+				summary.maxFraudConf = anomaly.confidence
+			}
 			evt := h.buildEvent(payload, now, frame.TimestampSec, anomaly)
 			if err := h.chWriter.Write(ctx, evt); err != nil {
 				h.logger.Warn("failed to write AI anomaly event", zap.Error(err))
@@ -598,7 +644,7 @@ func (h *AIAnalysisHandler) writeBackAnomalies(
 		}
 	}
 
-	return count, nil
+	return count, summary, nil
 }
 
 type aiFrameAnalyzedPayload struct {
@@ -676,7 +722,7 @@ type aiMultiplePersonsPayload struct {
 	Persons             []aiPersonBox `json:"persons"`
 }
 
-func classifyFrameAnomalies(frame *inferencepb.FrameAnalysis, thresholds AIAnalysisThresholds) []detectedAIAnomaly {
+func (h *AIAnalysisHandler) classifyFrameAnomalies(ctx context.Context, sessionID string, frame *inferencepb.FrameAnalysis, thresholds AIAnalysisThresholds, evaluateWindow bool) []detectedAIAnomaly {
 	if frame == nil {
 		return nil
 	}
@@ -744,6 +790,9 @@ func classifyFrameAnomalies(frame *inferencepb.FrameAnalysis, thresholds AIAnaly
 		// Люди, найденные детектором объектов (выше порога уверенности)
 	var persons []aiPersonBox
 	var maxPersonConf float32
+	var phoneDetected bool
+	var maxPhoneConf float32
+	var phoneObj *inferencepb.ObjectDetection
 
 	for _, obj := range frame.Objects {
 		if obj.Confidence < thresholds.ObjectConfidence {
@@ -754,8 +803,12 @@ func classifyFrameAnomalies(frame *inferencepb.FrameAnalysis, thresholds AIAnaly
 		severity := valueobject.SeverityWarning
 		switch strings.ToLower(strings.TrimSpace(obj.ObjectType)) {
 		case "phone", "cell phone":
-			evtType = valueobject.PhoneDetected
-			severity = valueobject.SeverityCritical
+			phoneDetected = true
+			if obj.Confidence > maxPhoneConf {
+				maxPhoneConf = obj.Confidence
+				phoneObj = obj
+			}
+			continue
 		case "book":
 			evtType = valueobject.BookDetected
 		case "earbuds":
@@ -796,22 +849,70 @@ func classifyFrameAnomalies(frame *inferencepb.FrameAnalysis, thresholds AIAnaly
 		})
 	}
 
-	if len(persons) > 1 {
-		payload := aiMultiplePersonsPayload{
-			ObjectType:          "person",
-			PersonCount:         len(persons),
-			FaceCount:           faceCount,
-			DetectionConfidence: maxPersonConf,
-			Persons:             persons,
+	// We pass evaluateWindow=true when we actually want to trigger rules (in writeBackAnomalies).
+	// When true, we apply sliding window smoothing over time.
+	if evaluateWindow {
+		eventTime := time.UnixMilli(int64(frame.TimestampSec * 1000))
+
+		// 1. Phone Rule (Threshold: 3 frames in 25s, Cooldown: 60s)
+		if phoneDetected {
+			triggered, err := rules.EvaluateWindow(ctx, h.rdb, sessionID, "phone_detected", eventTime, 25*time.Second, 3, 60*time.Second)
+			if err == nil && triggered {
+				payload := aiObjectDetectionPayload{
+					ObjectType:          phoneObj.ObjectType,
+					BboxX:               phoneObj.BboxX,
+					BboxY:               phoneObj.BboxY,
+					BboxW:               phoneObj.BboxW,
+					BboxH:               phoneObj.BboxH,
+					DetectionConfidence: maxPhoneConf,
+				}
+				anomalies = append(anomalies, detectedAIAnomaly{
+					eventType:   valueobject.PhoneDetected,
+					severity:    valueobject.SeverityCritical,
+					label:       fmt.Sprintf("Backend AI: phone detected (conf=%.2f)", maxPhoneConf),
+					confidence:  maxPhoneConf,
+					payload:     marshalAIAnomalyPayload(payload),
+					payloadType: "object_detection",
+				})
+			}
 		}
-		anomalies = append(anomalies, detectedAIAnomaly{
-			eventType:   valueobject.MultiplePersons,
-			severity:    valueobject.SeverityCritical,
-			label:       fmt.Sprintf("Backend AI: multiple persons detected (count=%d, conf=%.2f)", len(persons), maxPersonConf),
-			confidence:  maxPersonConf,
-			payload:     marshalAIAnomalyPayload(payload),
-			payloadType: "object_detection",
-		})
+
+		// 2. Multiple Persons Rule (Threshold: 3 frames in 25s, Cooldown: 60s)
+		if thresholds.EnableBackendFaceRules && len(persons) > 1 {
+			triggered, err := rules.EvaluateWindow(ctx, h.rdb, sessionID, "multiple_persons", eventTime, 25*time.Second, 3, 60*time.Second)
+			if err == nil && triggered {
+				payload := aiMultiplePersonsPayload{
+					ObjectType:          "person",
+					PersonCount:         len(persons),
+					FaceCount:           faceCount,
+					DetectionConfidence: maxPersonConf,
+					Persons:             persons,
+				}
+				anomalies = append(anomalies, detectedAIAnomaly{
+					eventType:   valueobject.MultiplePersons,
+					severity:    valueobject.SeverityCritical,
+					label:       fmt.Sprintf("Backend AI: multiple persons detected (count=%d, conf=%.2f)", len(persons), maxPersonConf),
+					confidence:  maxPersonConf,
+					payload:     marshalAIAnomalyPayload(payload),
+					payloadType: "object_detection",
+				})
+			}
+		}
+
+		// 3. Face Not Detected Rule (Threshold: 4 frames in 25s, Cooldown: 60s)
+		if thresholds.EnableBackendFaceRules && faceCount == 0 {
+			triggered, err := rules.EvaluateWindow(ctx, h.rdb, sessionID, "face_not_detected", eventTime, 25*time.Second, 4, 60*time.Second)
+			if err == nil && triggered {
+				anomalies = append(anomalies, detectedAIAnomaly{
+					eventType:   valueobject.FaceNotDetected,
+					severity:    valueobject.SeverityWarning,
+					label:       "Backend AI: face not detected",
+					confidence:  1.0,
+					payload:     marshalAIAnomalyPayload(map[string]string{"reason": "no_faces_found"}),
+					payloadType: "face_detection",
+				})
+			}
+		}
 	}
 
 	if isConfiguredLivenessFailure(frame.Liveness, thresholds.Liveness) {
@@ -866,7 +967,7 @@ func faceBBoxJSON(face *inferencepb.FaceDetection) string {
 	return fmt.Sprintf(`{"x":%f,"y":%f,"w":%f,"h":%f}`, face.BboxX, face.BboxY, face.BboxW, face.BboxH)
 }
 
-func summarizeAIFrames(frames []*inferencepb.FrameAnalysis, thresholds AIAnalysisThresholds) *inferencepb.AnalysisSummary {
+func (h *AIAnalysisHandler) summarizeAIFrames(ctx context.Context, sessionID string, frames []*inferencepb.FrameAnalysis, thresholds AIAnalysisThresholds) *inferencepb.AnalysisSummary {
 	thresholds = normalizeAIAnalysisThresholds(thresholds)
 
 	summary := &inferencepb.AnalysisSummary{
@@ -890,7 +991,7 @@ func summarizeAIFrames(frames []*inferencepb.FrameAnalysis, thresholds AIAnalysi
 			}
 		}
 
-		anomalies := classifyFrameAnomalies(frame, thresholds)
+		anomalies := h.classifyFrameAnomalies(ctx, sessionID, frame, thresholds, false)
 		if len(anomalies) == 0 {
 			continue
 		}

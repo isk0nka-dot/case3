@@ -143,11 +143,22 @@ def _run_yolo(session: Any, image: Any, confidence_threshold: float) -> list[dic
     input_meta = session.get_inputs()[0]
     input_name = input_meta.name
     input_shape = list(input_meta.shape)
-    height = _shape_dim(input_shape, 2, 640)
-    width = _shape_dim(input_shape, 3, 640)
+    net_h = _shape_dim(input_shape, 2, 640)
+    net_w = _shape_dim(input_shape, 3, 640)
 
-    resized = image.resize((width, height))
-    tensor = np.asarray(resized, dtype=np.float32) / 255.0
+    # Letterbox resize
+    orig_w, orig_h = image.size
+    r = min(net_w / orig_w, net_h / orig_h)
+    new_unpad = (int(round(orig_w * r)), int(round(orig_h * r)))
+    dw = (net_w - new_unpad[0]) / 2.0
+    dh = (net_h - new_unpad[1]) / 2.0
+
+    from PIL import Image
+    resized = image.resize(new_unpad, Image.Resampling.BILINEAR)
+    new_image = Image.new("RGB", (net_w, net_h), (114, 114, 114))
+    new_image.paste(resized, (int(dw), int(dh)))
+
+    tensor = np.asarray(new_image, dtype=np.float32) / 255.0
     tensor = np.transpose(tensor, (2, 0, 1))[None, ...]
 
     outputs = session.run(None, {input_name: tensor})
@@ -162,7 +173,10 @@ def _run_yolo(session: Any, image: Any, confidence_threshold: float) -> list[dic
     if raw.shape[0] < raw.shape[1] and raw.shape[0] <= 128:
         raw = raw.T
 
-    detections: list[dict[str, Any]] = []
+    # Filter and NMS
+    boxes_by_class: dict[int, list[list[float]]] = {}
+    scores_by_class: dict[int, list[float]] = {}
+
     for row in raw:
         if row.shape[0] < 6:
             continue
@@ -177,24 +191,83 @@ def _run_yolo(session: Any, image: Any, confidence_threshold: float) -> list[dic
             class_id = int(np.argmax(scores))
             confidence = float(scores[class_id])
 
-        mapped = COCO_CLASS_MAP.get(class_id)
-        if mapped is None or confidence < confidence_threshold:
+        if COCO_CLASS_MAP.get(class_id) is None or confidence < confidence_threshold:
             continue
 
         cx, cy, w, h = [float(v) for v in row[:4]]
-        detections.append({
-            "object_type": mapped,
-            "confidence": confidence,
-            "bbox": {
-                "x": max(0.0, (cx - w / 2.0) / width),
-                "y": max(0.0, (cy - h / 2.0) / height),
-                "w": min(1.0, w / width),
-                "h": min(1.0, h / height),
-            },
-        })
+        # Convert to unpadded image coordinates
+        cx = (cx - dw) / r
+        cy = (cy - dh) / r
+        w = w / r
+        h = h / r
+        
+        # x1, y1, x2, y2
+        x1 = cx - w / 2.0
+        y1 = cy - h / 2.0
+        x2 = cx + w / 2.0
+        y2 = cy + h / 2.0
+        
+        if class_id not in boxes_by_class:
+            boxes_by_class[class_id] = []
+            scores_by_class[class_id] = []
+        boxes_by_class[class_id].append([x1, y1, x2, y2])
+        scores_by_class[class_id].append(confidence)
 
+    detections: list[dict[str, Any]] = []
+    
+    # Apply NMS per class
+    iou_threshold = 0.45
+    for class_id in boxes_by_class:
+        cls_boxes = np.array(boxes_by_class[class_id])
+        cls_scores = np.array(scores_by_class[class_id])
+        
+        x1 = cls_boxes[:, 0]
+        y1 = cls_boxes[:, 1]
+        x2 = cls_boxes[:, 2]
+        y2 = cls_boxes[:, 3]
+        areas = (x2 - x1) * (y2 - y1)
+        
+        order = cls_scores.argsort()[::-1]
+        
+        while order.size > 0:
+            i = order[0]
+            
+            # normalize coords for return [0, 1] relative to orig image
+            norm_x = max(0.0, x1[i] / orig_w)
+            norm_y = max(0.0, y1[i] / orig_h)
+            norm_w = min(1.0, (x2[i] - x1[i]) / orig_w)
+            norm_h = min(1.0, (y2[i] - y1[i]) / orig_h)
+            
+            detections.append({
+                "object_type": COCO_CLASS_MAP[class_id],
+                "confidence": float(cls_scores[i]),
+                "bbox": {
+                    "x": norm_x,
+                    "y": norm_y,
+                    "w": norm_w,
+                    "h": norm_h,
+                },
+            })
+            
+            if order.size == 1:
+                break
+                
+            xx1 = np.maximum(x1[i], x1[order[1:]])
+            yy1 = np.maximum(y1[i], y1[order[1:]])
+            xx2 = np.minimum(x2[i], x2[order[1:]])
+            yy2 = np.minimum(y2[i], y2[order[1:]])
+            
+            inter_w = np.maximum(0.0, xx2 - xx1)
+            inter_h = np.maximum(0.0, yy2 - yy1)
+            inter = inter_w * inter_h
+            
+            iou = inter / (areas[i] + areas[order[1:]] - inter)
+            inds = np.where(iou <= iou_threshold)[0]
+            order = order[inds + 1]
+
+    # Sort by confidence descending
+    detections.sort(key=lambda d: d["confidence"], reverse=True)
     return detections[:20]
-
 
 def _run_arcface(session: Any, image: Any, reference_embedding: list[float]) -> dict[str, Any] | None:
     import numpy as np

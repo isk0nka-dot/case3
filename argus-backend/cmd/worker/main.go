@@ -38,6 +38,7 @@ import (
 	minioStore "github.com/argus-ai/event-collector/internal/infrastructure/minio"
 	"github.com/argus-ai/event-collector/internal/infrastructure/postgres"
 	"github.com/argus-ai/event-collector/internal/infrastructure/worker"
+	"github.com/redis/go-redis/v9"
 )
 
 var (
@@ -196,6 +197,20 @@ func run() error {
 	integrityVerifier := integrityInfra.NewVerifier(chWriter.Conn(), evidenceStore, logger)
 
 	// =================================================================
+	// STEP 8.5: Initialise go-redis client.
+	// =================================================================
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     cfg.Redis.Addr,
+		Password: cfg.Redis.Password,
+		DB:       cfg.Redis.DB,
+	})
+	defer func() {
+		if err := rdb.Close(); err != nil {
+			logger.Error("redis close error", zap.Error(err))
+		}
+	}()
+
+	// =================================================================
 	// STEP 9: Create asynq task handlers.
 	// =================================================================
 	videoExportHandler := worker.NewVideoExportHandler(
@@ -218,12 +233,13 @@ func run() error {
 		cfg.Inference.GRPCAddr(),
 		chWriter.Conn(), chWriter, pgRepo,
 		minioClient, cfg.MinIO.Bucket,
-		logger, telegramAlerter,
+		telegramAlerter, rdb, logger,
 		worker.AIAnalysisThresholds{
-			FaceMismatch:     cfg.Inference.FaceMismatchThreshold,
-			Liveness:         cfg.Inference.LivenessThreshold,
-			ObjectConfidence: cfg.Inference.ObjectConfidenceThreshold,
-			SpoofConfidence:  cfg.Inference.SpoofConfidenceThreshold,
+			FaceMismatch:           cfg.Inference.FaceMismatchThreshold,
+			Liveness:               cfg.Inference.LivenessThreshold,
+			ObjectConfidence:       cfg.Inference.ObjectConfidenceThreshold,
+			SpoofConfidence:        cfg.Inference.SpoofConfidenceThreshold,
+			EnableBackendFaceRules: cfg.Inference.EnableBackendFaceRules,
 		},
 	)
 	aiAnalysisHandler.ConfigureFrameExtraction(worker.FrameExtractionConfig{

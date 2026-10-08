@@ -231,6 +231,11 @@ type InferenceConfig struct {
 	ObjectConfidenceThreshold float32 `yaml:"object_confidence_threshold"`
 	SpoofConfidenceThreshold  float32 `yaml:"spoof_confidence_threshold"`
 
+	// EnableBackendFaceRules controls whether backend AI emits MULTIPLE_PERSONS
+	// and FACE_NOT_DETECTED events. Since the frontend MediaPipe already emits these,
+	// this should default to false to avoid duplicates.
+	EnableBackendFaceRules bool `yaml:"enable_backend_face_rules"`
+
 	// Concurrency is the number of parallel inference workers. Default: 4.
 	Concurrency int `yaml:"concurrency"`
 }
