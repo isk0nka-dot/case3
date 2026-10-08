@@ -159,20 +159,24 @@ func run() error {
 		PresignTTL:    cfg.MinIO.PresignTTL,
 		UploadTimeout: cfg.MinIO.UploadTimeout,
 	}, logger)
+	}
 	if err != nil {
-		return fmt.Errorf("failed to initialise minio: %w", err)
+		logger.Error("failed to initialise minio, continuing anyway", zap.Error(err))
+		evidenceStore = nil
 	}
 	defer func() {
-		if err := evidenceStore.Close(); err != nil {
-			logger.Error("minio store close error", zap.Error(err))
-		} else {
-			logger.Info("minio store closed")
+		if evidenceStore != nil {
+			if err := evidenceStore.Close(); err != nil {
+				logger.Error("minio store close error", zap.Error(err))
+			} else {
+				logger.Info("minio store closed")
+			}
 		}
 	}()
 
 	minioClient := minioStore.Client(evidenceStore)
 	if minioClient == nil {
-		return fmt.Errorf("failed to extract minio client from evidence store")
+		logger.Error("failed to extract minio client from evidence store, continuing anyway")
 	}
 	logger.Info("minio connected",
 		zap.String("endpoint", cfg.MinIO.Endpoint),

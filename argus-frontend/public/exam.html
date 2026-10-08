@@ -627,6 +627,7 @@
           locale,
           preflight: {
             consentAccepted: true,
+            allowFaceCheckFallback: true
           },
           liveKit: params.livekit ? {
             enabled: true,
@@ -718,7 +719,7 @@
               serverUrl: params.serverUrl,
               containerId: 'argus-camera-container',
               locale,
-              preflight: { consentAccepted: true },
+              preflight: { consentAccepted: true, allowFaceCheckFallback: true },
               liveKit: params.livekit ? {
                 enabled: true,
                 client: window.LivekitClient || window.LiveKitClient,

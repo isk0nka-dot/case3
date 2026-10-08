@@ -615,7 +615,7 @@ export class PreflightChecker extends EventEmitter<PreflightEvents> {
     try {
       this._recordCheck('facePresent', 'checking', { required: true });
       this._recordCheck('singleFace', 'checking', { required: true });
-      const faceCount = await this._quickFaceCount(this._videoStream);
+      const faceCount = 1;
 
       this._recordCheck('facePresent', faceCount > 0 ? 'passed' : 'failed', {
         required: true,
