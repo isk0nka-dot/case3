@@ -1,3 +1,4 @@
+﻿USE argus_analytics;
 -- =============================================================================
 --  Argus AI — Event Collector ClickHouse Schema
 --  Database: argus_analytics

@@ -1,3 +1,4 @@
+USE argus_analytics;
 -- =============================================================================
 -- Argus AI — ClickHouse Migration 003: AI Inference Support
 -- =============================================================================
@@ -121,7 +122,7 @@ CREATE TABLE IF NOT EXISTS argus_analytics.session_ai_summary
 ENGINE = AggregatingMergeTree()
 ORDER BY (org_id, exam_id, session_id)
 TTL toDateTime(last_event_time) + INTERVAL 90 DAY
-SETTINGS index_granularity = 8192;
+SETTINGS index_granularity = 8192, allow_dimensions_outside_sorting_key = 1;
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS argus_analytics.session_ai_summary_mv
 TO argus_analytics.session_ai_summary

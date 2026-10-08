@@ -1,3 +1,4 @@
+﻿USE argus_analytics;
 -- =============================================================================
 -- Migration 005: Hybrid Logical Clock — Causal Sequence Column
 --

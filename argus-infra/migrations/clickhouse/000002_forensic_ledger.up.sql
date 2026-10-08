@@ -1,3 +1,4 @@
+﻿USE argus_analytics;
 -- =============================================================================
 --  Argus AI — Migration 002: Forensic Ledger Hash Chaining
 --  Database: argus_analytics
