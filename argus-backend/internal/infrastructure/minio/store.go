@@ -326,7 +326,7 @@ func (s *Store) MinIOClient() *minio.Client {
 // Client is a package-level helper that extracts the MinIO client from
 // an EvidenceStore interface. Returns nil if the store is not a MinIO Store.
 func Client(store interface{}) *minio.Client {
-	if s, ok := store.(*Store); ok {
+	if s, ok := store.(*Store); ok && s != nil {
 		return s.MinIOClient()
 	}
 	return nil

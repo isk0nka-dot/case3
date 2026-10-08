@@ -5,7 +5,8 @@ import urllib.parse
 import psycopg2
 from datetime import datetime, timedelta
 
-secret = "argus-dev-admin-jwt-key-CHANGE-IN-PRODUCTION!"
+import base64
+secret = base64.b64decode("2xp8vaqUMGpY3uYRHGpMWLUqin9rfqy154qIaWPtay8=")
 session_id = str(uuid.uuid4())
 now = int(time.time())
 
