@@ -53,7 +53,7 @@ try:
 except Exception as e:
     print(f"⚠️ Сессияны дерекқорға қосу кезінде қате: {e}")
 
-url = f"http://localhost:3000/exam.html?token={token}&serverUrl=http://localhost:8080"
+url = f"http://localhost:3000/exam.html?token={token}&serverUrl=http://localhost:8080&sdkUrl=http://localhost:3000/argus-sdk.umd.js"
 
 print("\n--- ДЕМО СІЛТЕМЕ (ЭКЗАМЕН) ---")
 print(url)
