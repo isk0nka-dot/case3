@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -159,7 +160,7 @@ func (h *SSEHandler) handleSSE(w http.ResponseWriter, r *http.Request) {
 	defer pollTicker.Stop()
 	defer heartbeatTicker.Stop()
 
-	lastPollTime := time.Now().Add(-30 * time.Second) // Start 30s back to catch recent events
+	lastPollTime := time.Now().UTC().Add(-30 * time.Second) // Start 30s back to catch recent events
 	fraudDetected := false
 
 	ctx := r.Context()
@@ -188,7 +189,7 @@ func (h *SSEHandler) handleSSE(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			lastPollTime = time.Now()
+			lastPollTime = time.Now().UTC()
 
 			// Push violation events.
 			for _, v := range violations {
@@ -314,6 +315,7 @@ func (h *SSEHandler) queryNewViolations(ctx context.Context, sessionID string, s
 			continue
 		}
 		v.Timestamp = ts.Format(time.RFC3339)
+		v.EventType = strings.ToUpper(v.EventType)
 		violations = append(violations, v)
 	}
 

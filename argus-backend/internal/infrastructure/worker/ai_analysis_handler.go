@@ -752,8 +752,8 @@ func classifyFrameAnomalies(frame *inferencepb.FrameAnalysis, thresholds AIAnaly
 
 		var evtType valueobject.EventType
 		severity := valueobject.SeverityWarning
-		switch obj.ObjectType {
-		case "phone":
+		switch strings.ToLower(strings.TrimSpace(obj.ObjectType)) {
+		case "phone", "cell phone":
 			evtType = valueobject.PhoneDetected
 			severity = valueobject.SeverityCritical
 		case "book":
