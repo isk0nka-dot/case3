@@ -712,6 +712,9 @@ func classifyFrameAnomalies(frame *inferencepb.FrameAnalysis, thresholds AIAnaly
 		}
 	}
 
+	var personCount int32
+	var personMinConf float32
+
 	for _, obj := range frame.Objects {
 		if obj.Confidence < thresholds.ObjectConfidence {
 			continue
@@ -724,6 +727,10 @@ func classifyFrameAnomalies(frame *inferencepb.FrameAnalysis, thresholds AIAnaly
 		case "screen_reflection":
 			evtType = valueobject.BackendAIScreenReflection
 		case "person":
+			personCount++
+			if personCount == 1 || obj.Confidence < personMinConf {
+				personMinConf = obj.Confidence
+			}
 			continue
 		default:
 			evtType = valueobject.BackendAIHiddenObject
@@ -743,6 +750,17 @@ func classifyFrameAnomalies(frame *inferencepb.FrameAnalysis, thresholds AIAnaly
 			label:       fmt.Sprintf("Backend AI: %s detected (conf=%.2f)", obj.ObjectType, obj.Confidence),
 			confidence:  obj.Confidence,
 			payload:     marshalAIAnomalyPayload(payload),
+			payloadType: "object_detection",
+		})
+	}
+
+	if personCount > 1 {
+		anomalies = append(anomalies, detectedAIAnomaly{
+			eventType:   valueobject.MultiplePersons,
+			severity:    valueobject.SeverityCritical,
+			label:       fmt.Sprintf("Backend AI: multiple persons detected (count=%d)", personCount),
+			confidence:  personMinConf,
+			payload:     marshalAIAnomalyPayload(map[string]any{"object_type": "person", "person_count": personCount, "face_count": faceCount}),
 			payloadType: "object_detection",
 		})
 	}

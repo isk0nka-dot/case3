@@ -232,3 +232,34 @@ func TestClassifyFrameAnomaliesCarriesFacePayloadAndDenormalizedFields(t *testin
 		t.Fatalf("face embedding was not preserved, got len=%d", len(event.FaceEmbedding))
 	}
 }
+
+func TestClassifyFrameAnomaliesMultiplePersons(t *testing.T) {
+	frame := &inferencepb.FrameAnalysis{
+		Objects: []*inferencepb.ObjectDetection{
+			{ObjectType: "person", Confidence: 0.9},
+			{ObjectType: "person", Confidence: 0.8},
+		},
+	}
+	got := classifyFrameAnomalies(frame, AIAnalysisThresholds{ObjectConfidence: 0.7})
+	if len(got) != 1 || got[0].eventType != valueobject.MultiplePersons {
+		t.Fatalf("expected one MultiplePersons anomaly, got %#v", got)
+	}
+}
+
+func TestPhoneBuildsHiddenObjectEvent(t *testing.T) {
+	frame := &inferencepb.FrameAnalysis{
+		Objects: []*inferencepb.ObjectDetection{{ObjectType: "phone", Confidence: 0.9}},
+	}
+	got := classifyFrameAnomalies(frame, AIAnalysisThresholds{ObjectConfidence: 0.7})
+	if len(got) != 1 {
+		t.Fatalf("expected 1 anomaly, got %d", len(got))
+	}
+	a := got[0]
+	if a.eventType != valueobject.BackendAIHiddenObject || a.payloadType != "object_detection" {
+		t.Fatalf("unexpected phone anomaly: %#v", a)
+	}
+	var p aiObjectDetectionPayload
+	if err := json.Unmarshal(a.payload, &p); err != nil || p.ObjectType != "phone" {
+		t.Fatalf("payload must carry object_type=phone, got %s (err=%v)", a.payload, err)
+	}
+}
