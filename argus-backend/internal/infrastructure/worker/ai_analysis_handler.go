@@ -647,6 +647,22 @@ type aiLivenessPayload struct {
 	SpoofVector   string  `json:"spoof_vector,omitempty"`
 }
 
+type aiPersonBox struct {
+	BboxX      float32 `json:"bbox_x"`
+	BboxY      float32 `json:"bbox_y"`
+	BboxW      float32 `json:"bbox_w"`
+	BboxH      float32 `json:"bbox_h"`
+	Confidence float32 `json:"confidence"`
+}
+
+type aiMultiplePersonsPayload struct {
+	ObjectType          string        `json:"object_type"`
+	PersonCount         int           `json:"person_count"`
+	FaceCount           int32         `json:"face_count"`
+	DetectionConfidence float32       `json:"detection_confidence"`
+	Persons             []aiPersonBox `json:"persons"`
+}
+
 func classifyFrameAnomalies(frame *inferencepb.FrameAnalysis, thresholds AIAnalysisThresholds) []detectedAIAnomaly {
 	if frame == nil {
 		return nil
@@ -712,8 +728,9 @@ func classifyFrameAnomalies(frame *inferencepb.FrameAnalysis, thresholds AIAnaly
 		}
 	}
 
-	var personCount int32
-	var personMinConf float32
+		// Люди, найденные детектором объектов (выше порога уверенности)
+	var persons []aiPersonBox
+	var maxPersonConf float32
 
 	for _, obj := range frame.Objects {
 		if obj.Confidence < thresholds.ObjectConfidence {
@@ -721,15 +738,25 @@ func classifyFrameAnomalies(frame *inferencepb.FrameAnalysis, thresholds AIAnaly
 		}
 
 		var evtType valueobject.EventType
+		severity := valueobject.SeverityWarning
 		switch obj.ObjectType {
-		case "phone", "book", "earbuds":
+		case "phone":
+			evtType = valueobject.BackendAIHiddenObject
+			severity = valueobject.SeverityCritical // телефон = критичное нарушение
+		case "book", "earbuds":
 			evtType = valueobject.BackendAIHiddenObject
 		case "screen_reflection":
 			evtType = valueobject.BackendAIScreenReflection
 		case "person":
-			personCount++
-			if personCount == 1 || obj.Confidence < personMinConf {
-				personMinConf = obj.Confidence
+			persons = append(persons, aiPersonBox{
+				BboxX:      obj.BboxX,
+				BboxY:      obj.BboxY,
+				BboxW:      obj.BboxW,
+				BboxH:      obj.BboxH,
+				Confidence: obj.Confidence,
+			})
+			if obj.Confidence > maxPersonConf {
+				maxPersonConf = obj.Confidence
 			}
 			continue
 		default:
@@ -746,21 +773,28 @@ func classifyFrameAnomalies(frame *inferencepb.FrameAnalysis, thresholds AIAnaly
 		}
 		anomalies = append(anomalies, detectedAIAnomaly{
 			eventType:   evtType,
-			severity:    valueobject.SeverityWarning,
-			label:       fmt.Sprintf("Backend AI: %s detected (conf=%.2f)", obj.ObjectType, obj.Confidence),
+			severity:    severity,
+			label:       fmt.Sprintf("Backend AI: %s detected", obj.ObjectType),
 			confidence:  obj.Confidence,
 			payload:     marshalAIAnomalyPayload(payload),
 			payloadType: "object_detection",
 		})
 	}
 
-	if personCount > 1 {
+	if len(persons) > 1 {
+		payload := aiMultiplePersonsPayload{
+			ObjectType:          "person",
+			PersonCount:         len(persons),
+			FaceCount:           faceCount,
+			DetectionConfidence: maxPersonConf,
+			Persons:             persons,
+		}
 		anomalies = append(anomalies, detectedAIAnomaly{
 			eventType:   valueobject.MultiplePersons,
 			severity:    valueobject.SeverityCritical,
-			label:       fmt.Sprintf("Backend AI: multiple persons detected (count=%d)", personCount),
-			confidence:  personMinConf,
-			payload:     marshalAIAnomalyPayload(map[string]any{"object_type": "person", "person_count": personCount, "face_count": faceCount}),
+			label:       fmt.Sprintf("Backend AI: multiple persons detected (count=%d, conf=%.2f)", len(persons), maxPersonConf),
+			confidence:  maxPersonConf,
+			payload:     marshalAIAnomalyPayload(payload),
 			payloadType: "object_detection",
 		})
 	}
