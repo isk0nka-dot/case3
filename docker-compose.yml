@@ -220,6 +220,70 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+
+  # Inference Gateway (Go)
+  inference:
+    image: argus/inference:${BACKEND_TAG:-latest}
+    build:
+      context: ./argus-backend
+      dockerfile: Dockerfile.inference
+    container_name: argus-dev-inference
+    restart: unless-stopped
+    depends_on:
+      - ai-sidecar
+    volumes:
+      - ./argus-infra/docker/config.yaml:/app/config/config.yaml:ro
+    ports:
+      - "127.0.0.1:${ARGUS_INFERENCE_GRPC_PORT:-50061}:50061"
+    environment:
+      EVENT_COLLECTOR_INFERENCE_GRPC_HOST: 0.0.0.0
+      EVENT_COLLECTOR_INFERENCE_GRPC_PORT: 50061
+      EVENT_COLLECTOR_INFERENCE_ENGINE_TYPE: python_bridge
+      EVENT_COLLECTOR_INFERENCE_ALLOW_STUB: "false"
+      EVENT_COLLECTOR_INFERENCE_PYTHON_BRIDGE_URL: http://ai-sidecar:8091
+      EVENT_COLLECTOR_LOG_LEVEL: ${LOG_LEVEL:-info}
+    networks:
+      - argus-dev
+
+  # Worker (Go)
+  worker:
+    image: argus/worker:${BACKEND_TAG:-latest}
+    build:
+      context: ./argus-backend
+      dockerfile: Dockerfile.worker
+    container_name: argus-dev-worker
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      inference:
+        condition: service_started
+    volumes:
+      - ./argus-infra/docker/config.yaml:/app/config/config.yaml:ro
+      - badger-dev-data:/app/data/dlq
+    environment:
+      EVENT_COLLECTOR_KAFKA_BROKERS: kafka:9092
+      EVENT_COLLECTOR_CH_ADDRS: clickhouse:9000
+      EVENT_COLLECTOR_CH_DATABASE: ${CH_DATABASE:-argus_analytics}
+      EVENT_COLLECTOR_CH_USERNAME: ${CH_USERNAME:-default}
+      EVENT_COLLECTOR_CH_PASSWORD: ${CH_PASSWORD:-}
+      EVENT_COLLECTOR_PG_HOST: postgres
+      EVENT_COLLECTOR_PG_PORT: 5432
+      EVENT_COLLECTOR_PG_DATABASE: ${POSTGRES_DB:-argus}
+      EVENT_COLLECTOR_PG_USERNAME: ${POSTGRES_USER:-argus}
+      EVENT_COLLECTOR_PG_PASSWORD: ${POSTGRES_PASSWORD:-argus_secret}
+      EVENT_COLLECTOR_REDIS_ADDR: redis:6379
+      EVENT_COLLECTOR_INFERENCE_GRPC_HOST: inference
+      EVENT_COLLECTOR_INFERENCE_GRPC_PORT: 50061
+    networks:
+      - argus-dev
+
   # ── Frontend (Nuxt) ──────────────────────────────────────────────────────────
   frontend:
     image: argus/frontend:${FRONTEND_TAG:-latest}
